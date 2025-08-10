@@ -1,11 +1,55 @@
+use aya::maps::AsyncPerfEventArray;
 use aya::programs::TracePoint;
-#[rustfmt::skip]
-use log::{debug, warn};
+use aya::util::online_cpus;
+use bytes::BytesMut;
+use task_common::{ARGV_LEN, ARGV_OFFSET};
+use std::convert::TryInto;
 use tokio::signal;
+use tracing::{info, debug, warn, error};
+use std::time::{SystemTime, UNIX_EPOCH};
+use chrono::Duration as ChronoDuration;
+
+mod store;
+mod server;
+use store::{ProcessExecution, ExecutionStorage};
+use server::start_http_server;
+
+const LEN_MAX_PATH: usize = 64;
+pub const MAX_EVENTS: usize = 500;
+
+#[repr(C)]
+#[derive(Clone)]
+pub struct ExecEvent {
+    pub pid: u32,
+    pub timestamp: u64,
+    pub command: [u8; LEN_MAX_PATH],
+    pub command_len: usize,
+    pub argvs: [[u8; ARGV_LEN]; ARGV_OFFSET],
+    pub argvs_offset: [usize; ARGV_OFFSET],
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    info!("Starting eBPF process monitor with HTTP API");
+
+    // Create shared storage
+    let storage = ExecutionStorage::new();
+    let storage_clone = storage.clone();
+
+    // Establish boot offset: wall_clock_now - monotonic_now
+    let start_wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    // Use clock_gettime for monotonic ns since boot
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts); }
+    let mono_now_ns = (ts.tv_sec as i128) * 1_000_000_000 + (ts.tv_nsec as i128);
+    let wall_now_ns = start_wall.as_nanos() as i128;
+    let boot_offset_ns = wall_now_ns - mono_now_ns; // so: wall_event = boot_offset_ns + event_mono
+    let boot_offset = ChronoDuration::nanoseconds(boot_offset_ns as i64);
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -15,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
     if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {ret}");
+        warn!("remove limit on locked memory failed, ret is: {ret}");
     }
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
@@ -34,10 +78,63 @@ async fn main() -> anyhow::Result<()> {
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
 
+    info!("eBPF program loaded and attached");
+
+    let mut perf_command_events =
+        AsyncPerfEventArray::try_from(ebpf.take_map("COMMAND_EVENTS").unwrap())?;
+
+    // Spawn eBPF event processing tasks
+    for cpu_id in online_cpus().map_err(|(_, error)| error)? {
+        let mut buf = perf_command_events.open(cpu_id, None)?;
+        let storage_task = storage.clone();
+
+        tokio::task::spawn(async move {
+            let mut buffers = (0..10)
+                .map(|_| BytesMut::with_capacity(1024))
+                .collect::<Vec<_>>();
+            let boot_offset = boot_offset;
+
+            loop {
+                match buf.read_events(&mut buffers).await {
+                    Ok(events) => {
+                        for i in 0..events.read {
+                            let buf = &mut buffers[i];
+                            let ptr = buf.as_ptr() as *const ExecEvent;
+                            let raw_event = unsafe { ptr.read_unaligned() };
+
+                            let execution = ProcessExecution::from_event(&raw_event, boot_offset);
+
+                            // Log the execution event with structured logging
+                            debug!(
+                                pid = execution.pid,
+                                command = %execution.commandstr,
+                                args = %execution.argstr,
+                                timestamp = %execution.timestamp,
+                                "Process execution captured"
+                            );
+
+                            // Store the execution
+                            storage_task.add_execution(execution).await;
+                        }
+                    }
+                    Err(err) => {
+                        error!("Error reading eBPF events: {:?}", err);
+                    }
+                }
+            }
+        });
+    }
+
+    // Start HTTP server
+    let server_handle = start_http_server(storage_clone).await?;
+
+    // Wait for Ctrl-C
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
     ctrl_c.await?;
     println!("Exiting...");
 
+    // Clean shutdown
+    server_handle.abort();
     Ok(())
 }
