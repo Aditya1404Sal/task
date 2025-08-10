@@ -1,6 +1,7 @@
 use aya::maps::AsyncPerfEventArray;
 use aya::programs::TracePoint;
 use aya::util::online_cpus;
+use aya::maps::HashMap; // added for exclusion map population
 use bytes::BytesMut;
 use task_common::{ARGV_LEN, ARGV_OFFSET};
 use std::convert::TryInto;
@@ -11,11 +12,14 @@ use chrono::Duration as ChronoDuration;
 
 mod store;
 mod server;
+mod constant;
 use store::{ProcessExecution, ExecutionStorage};
 use server::start_http_server;
+use crate::constant::EXCLUDE_LIST; // bring exclusion list into scope
 
 const LEN_MAX_PATH: usize = 64;
 pub const MAX_EVENTS: usize = 500;
+pub const MAX_PATH_LEN: usize = 64;
 
 #[repr(C)]
 #[derive(Clone)]
@@ -78,6 +82,14 @@ async fn main() -> anyhow::Result<()> {
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
 
+    // Populate exclusion map in kernel (EXCLUDED_CMDS)
+    let map = ebpf.map_mut("EXCLUDED_CMDS").unwrap();
+    let mut excluded_cmds: HashMap<_, [u8; MAX_PATH_LEN], u8> = HashMap::try_from(map)?;
+    for cmd in EXCLUDE_LIST.iter() {
+        let key = cmd_to_key(cmd);
+        excluded_cmds.insert(key, 1, 0)?;
+    }
+
     info!("eBPF program loaded and attached");
 
     let mut perf_command_events =
@@ -137,4 +149,11 @@ async fn main() -> anyhow::Result<()> {
     // Clean shutdown
     server_handle.abort();
     Ok(())
+}
+
+fn cmd_to_key(cmd: &str) -> [u8; MAX_PATH_LEN] {
+    let mut key = [0u8; MAX_PATH_LEN];
+    let bytes = cmd.as_bytes();
+    key[..bytes.len()].copy_from_slice(bytes);
+    key
 }

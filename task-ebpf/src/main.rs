@@ -3,8 +3,8 @@
 
 use aya_ebpf::{
     helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user, bpf_probe_read_user_str_bytes, r#gen::bpf_ktime_get_ns},
-    macros::{tracepoint, map},
-    maps::PerfEventArray,
+    macros::{map, tracepoint},
+    maps::{HashMap, PerfEventArray},
     programs::TracePointContext,
 };
 use task_common::{ARGV_LEN, ARGV_OFFSET, COMMAND_LEN};
@@ -26,11 +26,23 @@ pub struct ExecEvent {
 #[map]
 static mut COMMAND_EVENTS: PerfEventArray<ExecEvent> = PerfEventArray::<ExecEvent>::new(0);
 
+#[map]
+static mut EXCLUDED_CMDS: HashMap<[u8; COMMAND_LEN], u8> = HashMap::<[u8; COMMAND_LEN], u8>::with_max_entries(10, 0);
+
 #[tracepoint]
 pub fn task(ctx: TracePointContext) -> u32 {
     match try_task(ctx) {
         Ok(ret) => ret,
         Err(_) => 1,
+    }
+}
+
+fn is_excluded(command: &[u8], command_len: usize) -> bool {
+    let mut key = [0u8; COMMAND_LEN];
+    let len = core::cmp::min(command_len, COMMAND_LEN);
+    key[..len].copy_from_slice(&command[..len]);
+    unsafe {
+        (*core::ptr::addr_of_mut!(EXCLUDED_CMDS)).get(&key).is_some()
     }
 }
 
@@ -50,6 +62,10 @@ fn try_task(ctx: TracePointContext) -> Result<u32, i64> {
     let command_ptr = unsafe { ctx.read_at::<*const u8>(FILENAME_OFFSET)? };
     let command_slice = unsafe { bpf_probe_read_user_str_bytes(command_ptr, &mut event.command)? };
     event.command_len = command_slice.len();
+
+    if is_excluded(command_slice, command_slice.len()) {
+        return Ok(0);
+    }
 
     let argv_ptrs = unsafe { ctx.read_at::<*const *const u8>(24)? };
     for i in 0..ARGV_OFFSET {
