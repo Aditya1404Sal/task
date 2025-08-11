@@ -1,0 +1,36 @@
+services:
+  task:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: task-monitor:latest
+    container_name: task-monitor
+    privileged: true
+    pid: host
+    ports:
+      - "3000:3000"
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - /lib/modules:/lib/modules:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /sys/devices/system/cpu:/sys/devices/system/cpu:ro
+    tmpfs:
+      - /sys/kernel/debug:exec,suid  
+      - /sys/kernel/tracing:exec,suid
+    security_opt:
+      - apparmor:unconfined
+      - seccomp:unconfined
+    cap_add:
+      - BPF
+      - SYS_ADMIN
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
