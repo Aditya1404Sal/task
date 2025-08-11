@@ -1,1 +1,2 @@
 pub const EXCLUDE_LIST: [&str; 7] = ["/usr/bin/bash", "/bin/sleep", "/usr/bin/sleep", "/usr/bin/cat", "/bin/sh", "/usr/sbin/ip6tables", "/usr/sbin/iptables"];
+// NOTE(Aditya): Pre-loaded these because these were the most noisy commands on my device

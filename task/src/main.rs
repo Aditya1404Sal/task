@@ -1,12 +1,12 @@
 use aya::maps::AsyncPerfEventArray;
 use aya::programs::TracePoint;
 use aya::util::online_cpus;
-use aya::maps::HashMap; // added for exclusion map population
+use aya::maps::HashMap;
 use bytes::BytesMut;
-use task_common::{ARGV_LEN, ARGV_OFFSET};
+use task_common::{ExecEvent, ARGV_OFFSET, COMMAND_LEN};
 use std::convert::TryInto;
 use tokio::signal;
-use tracing::{info, debug, warn, error};
+use tracing::{info, warn, error};
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::Duration as ChronoDuration;
 
@@ -15,22 +15,9 @@ mod server;
 mod constant;
 use store::{ProcessExecution, ExecutionStorage};
 use server::start_http_server;
-use crate::constant::EXCLUDE_LIST; // bring exclusion list into scope
+use crate::constant::EXCLUDE_LIST;
 
-const LEN_MAX_PATH: usize = 64;
 pub const MAX_EVENTS: usize = 500;
-pub const MAX_PATH_LEN: usize = 64;
-
-#[repr(C)]
-#[derive(Clone)]
-pub struct ExecEvent {
-    pub pid: u32,
-    pub timestamp: u64,
-    pub command: [u8; LEN_MAX_PATH],
-    pub command_len: usize,
-    pub argvs: [[u8; ARGV_LEN]; ARGV_OFFSET],
-    pub argvs_offset: [usize; ARGV_OFFSET],
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    info!("Starting eBPF process monitor with HTTP API");
+    info!("Starting eBPF runtime process monitor with HTTP API");
 
     // Create shared storage
     let storage = ExecutionStorage::new();
@@ -84,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Populate exclusion map in kernel (EXCLUDED_CMDS)
     let map = ebpf.map_mut("EXCLUDED_CMDS").unwrap();
-    let mut excluded_cmds: HashMap<_, [u8; MAX_PATH_LEN], u8> = HashMap::try_from(map)?;
+    let mut excluded_cmds: HashMap<_, [u8; COMMAND_LEN], u8> = HashMap::try_from(map)?;
     for cmd in EXCLUDE_LIST.iter() {
         let key = cmd_to_key(cmd);
         excluded_cmds.insert(key, 1, 0)?;
@@ -117,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
                             let execution = ProcessExecution::from_event(&raw_event, boot_offset);
 
                             // Log the execution event with structured logging
-                            debug!(
+                            info!(
                                 pid = execution.pid,
                                 command = %execution.commandstr,
                                 args = %execution.argstr,
@@ -151,8 +138,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_to_key(cmd: &str) -> [u8; MAX_PATH_LEN] {
-    let mut key = [0u8; MAX_PATH_LEN];
+fn cmd_to_key(cmd: &str) -> [u8; COMMAND_LEN] {
+    let mut key = [0u8; COMMAND_LEN];
     let bytes = cmd.as_bytes();
     key[..bytes.len()].copy_from_slice(bytes);
     key

@@ -7,21 +7,9 @@ use aya_ebpf::{
     maps::{HashMap, PerfEventArray},
     programs::TracePointContext,
 };
-use task_common::{ARGV_LEN, ARGV_OFFSET, COMMAND_LEN};
+use task_common::{ExecEvent, ARGV_LEN, ARGV_OFFSET, COMMAND_LEN};
 
 const FILENAME_OFFSET: usize = 16;
-
-#[repr(C)]
-#[derive(Clone)]
-pub struct ExecEvent {
-    // Reordered to match user-space struct
-    pub pid: u32,
-    pub timestamp: u64,
-    pub command: [u8; COMMAND_LEN],
-    pub command_len: usize,
-    pub argvs: [[u8; ARGV_LEN]; ARGV_OFFSET],
-    pub argvs_offset: [usize; ARGV_OFFSET],
-}
 
 #[map]
 static mut COMMAND_EVENTS: PerfEventArray<ExecEvent> = PerfEventArray::<ExecEvent>::new(0);
@@ -63,6 +51,7 @@ fn try_task(ctx: TracePointContext) -> Result<u32, i64> {
     let command_slice = unsafe { bpf_probe_read_user_str_bytes(command_ptr, &mut event.command)? };
     event.command_len = command_slice.len();
 
+    // Filtering takes place here
     if is_excluded(command_slice, command_slice.len()) {
         return Ok(0);
     }
