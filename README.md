@@ -20,6 +20,45 @@ cargo run --release --config 'target."cfg(all())".runner="sudo -E"'
 Cargo build scripts are used to automatically build the eBPF correctly and include it in the
 program.
 
+## Dependencies
+
+- rust version : 1.86.0 nightly (for local running you'll need to override your rustup to 1.86.0)
+
+## Running this applicaation via docker-compose
+
+- a simple `docker compose up --build` will work
+
+## system binary filtering
+
+- modify `/task/src/constant.rs` with the commands of your choice (I have pre-loaded a few based on my testing) [ **max entries are 10**, can be modified at `/task-ebpf/src/main.rs` and increasing the max entries of `EXCLUDED_CMDS`]
+
+## tracing
+
+### RUST_LOG=info -> logs all captured events on the usersapce side
+
+control env trace via the `docker-compose.yml`
+```yml
+  environment:
+      - RUST_LOG=info
+```
+
+## Endpoints
+
+**Server runs on port 3000**
+
+| Endpoint | Description | Example |
+|----------|-------------|---------|
+| `GET /executions` | Returns 500 most recent execve syscall events | `curl http://localhost:3000/executions` |
+| `GET /executions/:pid` | Returns event info for a specific PID | `curl http://localhost:3000/executions/31145` |
+
+
+
+## Unit tests : 
+
+- check out `/task/src/store.rs` for the added unit tests
+
+---
+
 ## Cross-compiling on macOS
 
 Cross compilation should work on both Intel and Apple Silicon Macs.
